@@ -159,3 +159,8 @@ require (
 	layeh.com/radius v0.0.0-20190118135028-0f678f039617 // indirect
 	sigs.k8s.io/yaml v1.1.0 // indirect
 )
+
+replace github.com/devopsfaith/krakend => ../krakend
+replace github.com/devopsfaith/krakend-httpcache => ../krakend-httpcache
+replace github.com/devopsfaith/krakend-gologging => ../krakend-gologging
+

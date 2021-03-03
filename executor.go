@@ -4,24 +4,27 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	krakendbf "github.com/devopsfaith/bloomfilter/krakend"
 	cel "github.com/devopsfaith/krakend-cel"
-	"github.com/devopsfaith/krakend-cobra"
+	cmd "github.com/devopsfaith/krakend-cobra"
+	cors "github.com/devopsfaith/krakend-cors/gin"
 	gelf "github.com/devopsfaith/krakend-gelf"
-	"github.com/devopsfaith/krakend-gologging"
-	"github.com/devopsfaith/krakend-jose"
+	gologging "github.com/devopsfaith/krakend-gologging"
+	jose "github.com/devopsfaith/krakend-jose"
 	logstash "github.com/devopsfaith/krakend-logstash"
 	metrics "github.com/devopsfaith/krakend-metrics/gin"
 	opencensus "github.com/devopsfaith/krakend-opencensus"
+	_ "github.com/devopsfaith/krakend-opencensus/exporter/datadog"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/influxdb"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/jaeger"
+	_ "github.com/devopsfaith/krakend-opencensus/exporter/ocagent"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/prometheus"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/stackdriver"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/xray"
 	_ "github.com/devopsfaith/krakend-opencensus/exporter/zipkin"
-	_ "github.com/devopsfaith/krakend-opencensus/exporter/ocagent"
 	pubsub "github.com/devopsfaith/krakend-pubsub"
 	"github.com/devopsfaith/krakend-usage/client"
 	"github.com/devopsfaith/krakend/config"
@@ -32,7 +35,7 @@ import (
 	server "github.com/devopsfaith/krakend/transport/http/server/plugin"
 	"github.com/gin-gonic/gin"
 	"github.com/go-contrib/uuid"
-	"github.com/letgoapp/krakend-influx"
+	influxdb "github.com/letgoapp/krakend-influx"
 )
 
 // NewExecutor returns an executor for the cmd package. The executor initalizes the entire gateway by
@@ -49,7 +52,7 @@ type PluginLoader interface {
 
 // SubscriberFactoriesRegister registers all the required subscriber factories from the available service
 // discover components and adapters and returns a service register function.
-// The service reguster function will register the service by the given name and port to all the available
+// The service register function will register the service by the given name and port to all the available
 // service discover clients
 type SubscriberFactoriesRegister interface {
 	Register(context.Context, config.ServiceConfig, logging.Logger) func(string, int)
@@ -92,6 +95,14 @@ type LoggerFactory interface {
 	NewLogger(config.ServiceConfig) (logging.Logger, io.Writer, error)
 }
 
+// RunServer defines the interface of a function used by the KrakenD router to start the service
+type RunServer func(context.Context, config.ServiceConfig, http.Handler) error
+
+// RunServerFactory returns a RunServer with several wraps around the injected one
+type RunServerFactory interface {
+	NewRunServer(logging.Logger, router.RunServerFunc) RunServer
+}
+
 // ExecutorBuilder is a composable builder. Every injected property is used by the NewCmdExecutor method.
 type ExecutorBuilder struct {
 	LoggerFactory               LoggerFactory
@@ -103,6 +114,7 @@ type ExecutorBuilder struct {
 	ProxyFactory                ProxyFactory
 	BackendFactory              BackendFactory
 	HandlerFactory              HandlerFactory
+	RunServerFactory            RunServerFactory
 
 	Middlewares []gin.HandlerFunc
 }
@@ -151,7 +163,7 @@ func (e *ExecutorBuilder) NewCmdExecutor(ctx context.Context) cmd.Executor {
 			Middlewares:    e.Middlewares,
 			Logger:         logger,
 			HandlerFactory: e.HandlerFactory.NewHandlerFactory(logger, metricCollector, tokenRejecterFactory),
-			RunServer:      router.RunServerFunc(server.New(logger, krakendrouter.RunServer)),
+			RunServer:      router.RunServerFunc(e.RunServerFactory.NewRunServer(logger, krakendrouter.RunServer)),
 		})
 
 		// start the engines
@@ -187,6 +199,20 @@ func (e *ExecutorBuilder) checkCollaborators() {
 	if e.LoggerFactory == nil {
 		e.LoggerFactory = new(LoggerBuilder)
 	}
+	if e.RunServerFactory == nil {
+		e.RunServerFactory = new(DefaultRunServerFactory)
+	}
+}
+
+// DefaultRunServerFactory creates the default RunServer by wrapping the injected RunServer
+// with the plugin loader and the CORS module
+type DefaultRunServerFactory struct{}
+
+func (d *DefaultRunServerFactory) NewRunServer(l logging.Logger, next router.RunServerFunc) RunServer {
+	return RunServer(server.New(
+		l,
+		server.RunServer(cors.NewRunServer(cors.NewRunServerWithLogger(cors.RunServer(next), l))),
+	))
 }
 
 // LoggerBuilder is the default BuilderFactory implementation.
